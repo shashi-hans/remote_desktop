@@ -88,9 +88,13 @@ The app asks for confirmation before it locks the laptop for this reason.
 ## Phone setup
 
 1. Install the APK: `adb install app/build/outputs/apk/release/app-release.apk`.
-2. Open the app and tap "Sign in to Tailscale". Approve the `rdp-mobile`
-   device with the same account as the laptop. The link works from any
-   browser. This is needed once; the node key stays in the app's private storage.
+2. Open the app and sign in to Tailscale with the same account as the laptop.
+   This is needed once; the node key stays in the app's private storage.
+   - **Sign in to Tailscale** opens the login page as a Custom Tab over the
+     app (Google and Microsoft sign-in block plain WebViews). The same link
+     also works from any other browser.
+   - Settings → **Sign out of Tailscale** logs the device out, for example to
+     switch accounts.
 3. Enter the laptop's Tailscale IP (`tailscale ip -4` on the laptop), the RDP
    username and password, and the agent token.
 4. On the first connect the app shows the laptop's certificate fingerprint.

@@ -1,7 +1,11 @@
 package rdpmobile.app
 
+import android.content.ActivityNotFoundException
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.util.Log
+import androidx.browser.customtabs.CustomTabsIntent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -21,7 +25,8 @@ import java.net.NetworkInterface
 
 sealed interface TailnetStatus {
     data object Starting : TailnetStatus
-    data class NeedsLogin(val url: String) : TailnetStatus
+    /** [error] explains a failed attempt, for example no sign-in link. */
+    data class NeedsLogin(val url: String, val error: String) : TailnetStatus
     data object Running : TailnetStatus
     data class Error(val message: String) : TailnetStatus
 }
@@ -41,6 +46,8 @@ object Tailnet {
     val status: StateFlow<TailnetStatus> = _status
 
     @Volatile private var started = false
+    @Volatile private var loginTabOpen = false
+    private lateinit var appContext: Context
 
     /** Starts the node once per process and keeps [status] updated. */
     fun start(context: Context) {
@@ -49,7 +56,8 @@ object Tailnet {
             if (started) return
             started = true
         }
-        val dir = File(context.applicationContext.filesDir, "tailscale").path
+        appContext = context.applicationContext
+        val dir = File(appContext.filesDir, "tailscale").path
         scope.launch {
             while (true) {
                 // Starts the node; a no-op while it runs. After an error the
@@ -63,8 +71,11 @@ object Tailnet {
                     continue
                 }
                 _status.value = when (val s = Tsbridge.state()) {
-                    "Running" -> TailnetStatus.Running
-                    "NeedsLogin" -> TailnetStatus.NeedsLogin(Tsbridge.loginURL())
+                    "Running" -> {
+                        if (loginTabOpen) returnFromLoginTab()
+                        TailnetStatus.Running
+                    }
+                    "NeedsLogin" -> TailnetStatus.NeedsLogin(Tsbridge.loginURL(), Tsbridge.lastError())
                     "NeedsMachineAuth" -> TailnetStatus.Error("Approve this device in the Tailscale admin console")
                     "Error" -> TailnetStatus.Error(Tsbridge.lastError().ifBlank { "Tailscale error" })
                     else -> TailnetStatus.Starting
@@ -95,6 +106,45 @@ object Tailnet {
         }
 
     suspend fun logout() = withContext(Dispatchers.IO) { Tsbridge.logout() }
+
+    /**
+     * Called when MainActivity is back in front, which means the login tab is
+     * no longer on top. A sign-in finished elsewhere (for example in another
+     * browser) must not pull the app forward or clear the activity stack.
+     */
+    fun loginTabGone() {
+        loginTabOpen = false
+    }
+
+    /**
+     * Closes the login Custom Tab once sign-in succeeds. The tab runs in the
+     * app's own task above MainActivity, so bringing MainActivity back with
+     * CLEAR_TOP removes it.
+     */
+    private fun returnFromLoginTab() {
+        loginTabOpen = false
+        runCatching {
+            appContext.startActivity(
+                Intent(appContext, MainActivity::class.java).addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP,
+                ),
+            )
+        }.onFailure { Log.w(TAG, "could not close login tab: ${it.message}") }
+    }
+
+    /**
+     * Opens the Tailscale login page as a Custom Tab over the app, falling back
+     * to the browser when no Custom Tabs provider is installed.
+     */
+    fun openLogin(context: Context, url: String) {
+        loginTabOpen = true
+        val uri = Uri.parse(url)
+        try {
+            CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(context, uri)
+        } catch (e: ActivityNotFoundException) {
+            context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+    }
 
     /**
      * Network interfaces for the Go side. Android 11+ blocks Go's netlink

@@ -65,6 +65,11 @@ import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    override fun onResume() {
+        super.onResume()
+        Tailnet.loginTabGone()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val store = ConfigStore(this)
@@ -301,35 +306,6 @@ private fun NotificationsCard() {
 }
 
 @Composable
-private fun TailnetCard(status: TailnetStatus) {
-    val context = LocalContext.current
-    when (status) {
-        TailnetStatus.Running -> Text(
-            "● Tailscale connected",
-            color = MaterialTheme.colorScheme.primary,
-            style = MaterialTheme.typography.bodySmall,
-        )
-        TailnetStatus.Starting -> Text("Connecting to Tailscale…", style = MaterialTheme.typography.bodySmall)
-        is TailnetStatus.Error -> Card(Modifier.fillMaxWidth()) {
-            Text("Tailscale: ${status.message}", modifier = Modifier.padding(16.dp))
-        }
-        is TailnetStatus.NeedsLogin -> Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Sign in to Tailscale with the same account as the laptop. This is needed once.")
-                Button(
-                    onClick = {
-                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(status.url)))
-                    },
-                    enabled = status.url.isNotBlank(),
-                ) {
-                    Text(if (status.url.isBlank()) "Getting sign-in link…" else "Sign in to Tailscale")
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun SettingsScreen(initial: LaptopConfig, store: ConfigStore, onSave: (LaptopConfig) -> Unit) {
     var c by remember { mutableStateOf(initial) }
     var rdpPort by remember { mutableStateOf(initial.rdpPort.toString()) }
@@ -402,5 +378,7 @@ private fun SettingsScreen(initial: LaptopConfig, store: ConfigStore, onSave: (L
         Button(onClick = { onSave(saved) }, enabled = saved.isComplete, modifier = Modifier.fillMaxWidth()) {
             Text("Save")
         }
+
+        TailscaleSignOut()
     }
 }

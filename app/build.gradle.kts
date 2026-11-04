@@ -65,6 +65,9 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
+    // Custom Tabs: Tailscale login opens as a tab over the app, which Google and
+    // Microsoft sign-in allow (they block plain WebViews).
+    implementation("androidx.browser:browser:1.8.0")
 
     testImplementation("junit:junit:4.13.2")
 }
