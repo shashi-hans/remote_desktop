@@ -5,9 +5,13 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.util.Log
+import android.security.keystore.KeyPermanentlyInvalidatedException
+import org.json.JSONException
 import org.json.JSONObject
 import java.security.KeyStore
 import java.security.MessageDigest
+import java.security.UnrecoverableKeyException
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -22,16 +26,21 @@ enum class Resolution(val label: String) {
 data class LaptopConfig(
     val name: String = "My laptop",
     val host: String = "",
-    val rdpPort: Int = 3389,
+    val rdpPort: Int = DEFAULT_RDP_PORT,
     val username: String = "",
     val password: String = "",
-    val agentPort: Int = 8765,
+    val agentPort: Int = DEFAULT_AGENT_PORT,
     val agentToken: String = "",
     val resolution: Resolution = Resolution.FHD,
 ) {
     val isComplete: Boolean get() = Tailnet.isTailnetLiteral(host) && username.isNotBlank()
     val hasAgent: Boolean get() = agentToken.isNotBlank()
     val pinKey: String get() = "${host.lowercase()}:$rdpPort"
+
+    companion object {
+        const val DEFAULT_RDP_PORT = 3389
+        const val DEFAULT_AGENT_PORT = 8765
+    }
 
     /** Changes when the agent target or its token changes. */
     val agentKey: String get() = "${host.trim()}:$agentPort:${agentToken.hashCode()}"
@@ -46,23 +55,37 @@ class ConfigStore(context: Context) {
     private val prefs = context.getSharedPreferences("config", Context.MODE_PRIVATE)
     private val pins = context.getSharedPreferences("cert_pins", Context.MODE_PRIVATE)
 
-    fun load(): LaptopConfig {
+    fun load(): LaptopConfig = loadOrNull() ?: LaptopConfig()
+
+    /**
+     * The saved config, a default config when nothing is saved (or the saved
+     * data can never be read again and was reset), or null when it cannot be
+     * read right now (a passing keystore error) and the caller should retry.
+     */
+    fun loadOrNull(): LaptopConfig? {
         val blob = prefs.getString(KEY_BLOB, null) ?: return LaptopConfig()
-        val json = runCatching { JSONObject(decrypt(blob)) }.getOrElse {
-            // The keystore key is gone or changed (for example after clearing
-            // credentials), so the blob can never be read again. Drop both so
-            // the next save starts with a fresh key instead of failing.
-            Log.w(TAG, "saved settings unreadable, resetting: ${it.javaClass.simpleName}")
-            reset()
-            return LaptopConfig()
+        val json = try {
+            JSONObject(decrypt(blob))
+        } catch (e: Exception) {
+            if (isPermanent(e)) {
+                // The keystore key is gone or changed (for example after
+                // clearing credentials), so the blob can never be read again.
+                // Drop both so the next save starts with a fresh key.
+                Log.w(TAG, "saved settings unreadable, resetting: ${e.javaClass.simpleName}")
+                reset()
+                return LaptopConfig()
+            }
+            // A passing keystore error must not erase the settings.
+            Log.w(TAG, "could not read settings this time: ${e.javaClass.simpleName}")
+            return null
         }
         return LaptopConfig(
             name = json.optString("name", "My laptop"),
             host = json.optString("host"),
-            rdpPort = json.optInt("rdpPort", 3389),
+            rdpPort = json.optInt("rdpPort", LaptopConfig.DEFAULT_RDP_PORT),
             username = json.optString("username"),
             password = json.optString("password"),
-            agentPort = json.optInt("agentPort", 8765),
+            agentPort = json.optInt("agentPort", LaptopConfig.DEFAULT_AGENT_PORT),
             agentToken = json.optString("agentToken"),
             resolution = runCatching { Resolution.valueOf(json.optString("resolution")) }
                 .getOrDefault(Resolution.FHD),
@@ -79,8 +102,20 @@ class ConfigStore(context: Context) {
             .put("agentPort", c.agentPort)
             .put("agentToken", c.agentToken.trim())
             .put("resolution", c.resolution.name)
-        prefs.edit().putString(KEY_BLOB, encrypt(json.toString())).apply()
+        prefs.edit()
+            .putString(KEY_BLOB, encrypt(json.toString()))
+            .putInt(KEY_VERSION, version() + 1)
+            .apply()
     }
+
+    /** Changes on every save; lets callers spot new settings without decrypting. */
+    fun version(): Int = prefs.getInt(KEY_VERSION, 0)
+
+    /** True for errors after which the saved blob can never be decrypted again. */
+    private fun isPermanent(e: Exception): Boolean =
+        e is AEADBadTagException || e is KeyPermanentlyInvalidatedException ||
+            e is UnrecoverableKeyException || e is JSONException ||
+            e is CorruptBlobException || e is IllegalArgumentException // bad Base64
 
     private fun reset() {
         prefs.edit().remove(KEY_BLOB).apply()
@@ -121,8 +156,12 @@ class ConfigStore(context: Context) {
         return Base64.encodeToString(out, Base64.NO_WRAP)
     }
 
+    /** The saved blob is too short to hold an IV and a GCM tag. */
+    private class CorruptBlobException : Exception()
+
     private fun decrypt(blob: String): String {
         val raw = Base64.decode(blob, Base64.NO_WRAP)
+        if (raw.size < IV_LEN + GCM_TAG_BYTES) throw CorruptBlobException()
         val cipher = Cipher.getInstance(TRANSFORM)
         cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, raw, 0, IV_LEN))
         return String(cipher.doFinal(raw, IV_LEN, raw.size - IV_LEN))
@@ -133,8 +172,10 @@ class ConfigStore(context: Context) {
         const val KEYSTORE = "AndroidKeyStore"
         const val KEY_ALIAS = "rdpmobile.config"
         const val KEY_BLOB = "blob"
+        const val KEY_VERSION = "version"
         const val TRANSFORM = "AES/GCM/NoPadding"
         const val IV_LEN = 12
+        const val GCM_TAG_BYTES = 16
     }
 }
 

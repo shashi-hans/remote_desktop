@@ -123,10 +123,10 @@ func (s *server) auth(next http.Handler) http.Handler {
 
 		got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		gotHash := sha256.Sum256([]byte(got))
+		// A valid token skips the block entirely. The failure record is left
+		// alone: behind userspace Tailscale the phone shares 127.0.0.1 with
+		// everyone, so clearing it here would make the limit meaningless.
 		if ok && subtle.ConstantTimeCompare(gotHash[:], s.tokenHash[:]) == 1 {
-			s.mu.Lock()
-			delete(s.fails, ip)
-			s.mu.Unlock()
 			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 			next.ServeHTTP(w, r)
 			return

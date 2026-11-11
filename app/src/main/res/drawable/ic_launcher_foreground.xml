@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Desktop controller: a monitor with a mouse pointer on its screen.
+     108dp adaptive-icon canvas; artwork stays inside the 66dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Monitor frame: outer and inner rounded rects, even-odd leaves the screen hollow. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M33,32 h42 a4,4 0 0 1 4,4 v28 a4,4 0 0 1 -4,4 h-42 a4,4 0 0 1 -4,-4 v-28 a4,4 0 0 1 4,-4 z M35,36 v28 h38 v-28 z" />
+    <!-- Stand: neck and base. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M50,68 h8 v6 h-8 z M42,74 h24 a2,2 0 0 1 2,2 v0 a2,2 0 0 1 -2,2 h-24 a2,2 0 0 1 -2,-2 v0 a2,2 0 0 1 2,-2 z" />
+    <!-- Mouse pointer on the screen. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M49,40 L49,59 L53.6,54.6 L56.8,61.6 L60,60.2 L56.8,53.3 L63,53.3 Z" />
+</vector>

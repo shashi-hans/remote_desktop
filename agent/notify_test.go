@@ -160,3 +160,24 @@ func TestStaleCursorAfterRestart(t *testing.T) {
 		t.Fatalf("cursor beyond latest must replay from start, got %d", len(items))
 	}
 }
+
+func TestCleanDecodesEntities(t *testing.T) {
+	if got := clean("<b>Tom &amp; Jerry</b> &lt;3", 50); got != "Tom & Jerry <3" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestDedupeUsesFullPrecision(t *testing.T) {
+	// GNOME's duplicate arrives 1.5 s after the original at x.9 s, inside the
+	// 2 s window. Rounding the stored time down to whole seconds made the gap
+	// look like 2.5 s, so the duplicate was kept; full precision drops it.
+	s := newNoteStore()
+	now := time.Unix(1_800_000_000, 900_000_000)
+	s.now = func() time.Time { return now }
+	s.add("a", "t", "b", true)
+	now = now.Add(1500 * time.Millisecond)
+	s.add("a", "t", "b", true)
+	if items, _, _ := s.since(0); len(items) != 1 {
+		t.Fatalf("duplicate within 2 s kept: %d items", len(items))
+	}
+}

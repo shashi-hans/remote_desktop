@@ -23,15 +23,16 @@ done
 export PATH="$CMAKE_BIN:$PATH"
 
 # Local fixes to FreeRDP's Android JNI code (scripts/patches/*.patch).
-# Each patch is applied once; a patch that is already in place is skipped.
+# The files they touch are first restored to the pinned FreeRDP commit, so an
+# older version of a patch left in the tree never blocks applying the current
+# one. Restoring and re-applying an unchanged patch rewrites identical content.
 for patch in "$ROOT"/scripts/patches/*.patch; do
 	[[ -e "$patch" ]] || continue
-	if git -C "$SRC" apply --reverse --check "$patch" 2>/dev/null; then
-		echo "already applied: $(basename "$patch")"
-	else
-		git -C "$SRC" apply "$patch"
-		echo "applied: $(basename "$patch")"
-	fi
+	git -C "$SRC" apply --numstat "$patch" | cut -f3 | while read -r file; do
+		git -C "$SRC" checkout -- "$file"
+	done
+	git -C "$SRC" apply "$patch"
+	echo "applied: $(basename "$patch")"
 done
 
 # Codecs are off: GNOME Remote Desktop works with the built-in RemoteFX and
@@ -50,11 +51,15 @@ cmake -S "$SRC/client/Android/Studio/freeRDPCore/src/main/cpp" \
 cmake --build "$BUILD"
 
 # The superbuild installs FreeRDP, OpenSSL and uriparser into the upstream
-# freeRDPCore jniLibs folder. OpenSSL's legacy.so provider is skipped: WinPR
-# is built with its own MD4/RC4 for NTLM.
+# freeRDPCore jniLibs folder. Only this fixed list is copied, so libraries left
+# there by an older build are never shipped. OpenSSL's legacy.so provider is
+# skipped: WinPR is built with its own MD4/RC4 for NTLM.
 UPSTREAM_LIBS="$SRC/client/Android/Studio/freeRDPCore/src/main/jniLibs/$ABI"
+LIBS=(libcrypto.so libssl.so libfreerdp3.so libfreerdp-client3.so libwinpr3.so liburiparser.so)
 mkdir -p "$OUT"
 rm -f "$OUT"/*.so
-cp "$UPSTREAM_LIBS"/lib*.so "$OUT/"
+for lib in "${LIBS[@]}"; do
+	cp "$UPSTREAM_LIBS/$lib" "$OUT/"
+done
 cp "$BUILD/libfreerdp-android.so" "$OUT/"
 ls -1 "$OUT"

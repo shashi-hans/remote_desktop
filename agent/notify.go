@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"html"
 	"io"
 	"log"
 	"os/exec"
@@ -37,6 +38,7 @@ type Note struct {
 type noteStore struct {
 	mu      sync.Mutex
 	items   []Note
+	lastAdd time.Time // full-precision time of the newest note, for dedupe
 	next    int64
 	epoch   string // changes on agent restart so clients reset their cursor
 	changed chan struct{}
@@ -62,10 +64,11 @@ func (s *noteStore) add(app, title, body string, popup bool) {
 	if n := len(s.items); n > 0 {
 		last := s.items[n-1]
 		if last.App == app && last.Title == title && last.Body == body &&
-			now.Sub(time.Unix(last.Time, 0)) <= dedupeWindow {
+			now.Sub(s.lastAdd) <= dedupeWindow {
 			return
 		}
 	}
+	s.lastAdd = now
 	s.items = append(s.items, Note{ID: s.next, App: app, Title: title, Body: body, Time: now.Unix(), Popup: popup})
 	s.next++
 	if len(s.items) > maxNotes {
@@ -225,8 +228,10 @@ func parseMonitor(r io.Reader, emit func(app, title, body string)) error {
 	return sc.Err()
 }
 
+// clean strips notification markup (<b>, <a href>…), decodes entities such
+// as &amp;, and truncates to maxRunes.
 func clean(s string, maxRunes int) string {
-	s = strings.TrimSpace(markup.ReplaceAllString(s, ""))
+	s = strings.TrimSpace(html.UnescapeString(markup.ReplaceAllString(s, "")))
 	r := []rune(s)
 	if len(r) > maxRunes {
 		return string(r[:maxRunes-1]) + "…"

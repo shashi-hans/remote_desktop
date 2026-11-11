@@ -1,61 +1,77 @@
 diff --git a/client/Android/Studio/freeRDPCore/src/main/cpp/android_event.c b/client/Android/Studio/freeRDPCore/src/main/cpp/android_event.c
-index 1a054b8..d3489d9 100644
+index 1a054b8..c6c9a57 100644
 --- a/client/Android/Studio/freeRDPCore/src/main/cpp/android_event.c
 +++ b/client/Android/Studio/freeRDPCore/src/main/cpp/android_event.c
-@@ -24,15 +24,24 @@
+@@ -24,58 +24,69 @@
  
  BOOL android_push_event(freerdp* inst, ANDROID_EVENT* event)
  {
 +	if (!inst || !inst->context || !event)
 +		return FALSE;
 +
++	/* Read the queue pointer once: uninit detaches it before freeing. */
  	androidContext* aCtx = (androidContext*)inst->context;
-+	if (!aCtx->event_queue)
++	ANDROID_EVENT_QUEUE* queue = aCtx->event_queue;
++	if (!queue)
 +		return FALSE;
  
-+	EnterCriticalSection(&aCtx->event_queue->lock);
- 	if (aCtx->event_queue->count >= aCtx->event_queue->size)
+-	if (aCtx->event_queue->count >= aCtx->event_queue->size)
++	EnterCriticalSection(&queue->lock);
++	if (queue->count >= queue->size)
  	{
- 		size_t new_size = aCtx->event_queue->size;
+-		size_t new_size = aCtx->event_queue->size;
++		size_t new_size = queue->size;
  		do
  		{
  			if (new_size >= SIZE_MAX - 128ull)
 +			{
-+				LeaveCriticalSection(&aCtx->event_queue->lock);
++				LeaveCriticalSection(&queue->lock);
  				return FALSE;
 +			}
  
  			new_size += 128ull;
- 		} while (new_size <= aCtx->event_queue->count);
-@@ -40,42 +49,36 @@ BOOL android_push_event(freerdp* inst, ANDROID_EVENT* event)
- 		    realloc((void*)aCtx->event_queue->events, sizeof(ANDROID_EVENT*) * new_size);
+-		} while (new_size <= aCtx->event_queue->count);
+-		void* new_events =
+-		    realloc((void*)aCtx->event_queue->events, sizeof(ANDROID_EVENT*) * new_size);
++		} while (new_size <= queue->count);
++		void* new_events = realloc((void*)queue->events, sizeof(ANDROID_EVENT*) * new_size);
  
  		if (!new_events)
 +		{
-+			LeaveCriticalSection(&aCtx->event_queue->lock);
++			LeaveCriticalSection(&queue->lock);
  			return FALSE;
 +		}
  
- 		aCtx->event_queue->events = new_events;
- 		aCtx->event_queue->size = new_size;
+-		aCtx->event_queue->events = new_events;
+-		aCtx->event_queue->size = new_size;
++		queue->events = new_events;
++		queue->size = new_size;
  	}
  
- 	aCtx->event_queue->events[(aCtx->event_queue->count)++] = event;
-+	LeaveCriticalSection(&aCtx->event_queue->lock);
- 	return SetEvent(aCtx->event_queue->isSet);
- }
- 
+-	aCtx->event_queue->events[(aCtx->event_queue->count)++] = event;
+-	return SetEvent(aCtx->event_queue->isSet);
+-}
+-
 -static ANDROID_EVENT* android_peek_event(ANDROID_EVENT_QUEUE* queue)
 -{
 -	ANDROID_EVENT* event;
--
++	queue->events[(queue->count)++] = event;
++	HANDLE isSet = queue->isSet;
++	LeaveCriticalSection(&queue->lock);
+ 
 -	if (queue->count < 1)
 -		return nullptr;
 -
 -	event = queue->events[0];
 -	return event;
--}
--
++	/* The event is queued and now owned by the queue, so report success even
++	 * if the wakeup fails: callers free the event on FALSE, which would free
++	 * it a second time when it is popped. */
++	if (!isSet || !SetEvent(isSet))
++		WLog_WARN(TAG, "android_push_event: SetEvent failed");
++	return TRUE;
+ }
+ 
  static ANDROID_EVENT* android_pop_event(ANDROID_EVENT_QUEUE* queue)
  {
 -	ANDROID_EVENT* event;
@@ -85,7 +101,7 @@ index 1a054b8..d3489d9 100644
  	return event;
  }
  
-@@ -89,11 +92,11 @@ static BOOL android_process_event(ANDROID_EVENT_QUEUE* queue, freerdp* inst)
+@@ -89,11 +100,11 @@ static BOOL android_process_event(ANDROID_EVENT_QUEUE* queue, freerdp* inst)
  	context = inst->context;
  	WINPR_ASSERT(context);
  
@@ -99,7 +115,7 @@ index 1a054b8..d3489d9 100644
  
  		WINPR_ASSERT(event);
  
-@@ -331,6 +334,7 @@ BOOL android_event_queue_init(freerdp* inst)
+@@ -331,10 +342,12 @@ BOOL android_event_queue_init(freerdp* inst)
  
  	queue->size = 16;
  	queue->count = 0;
@@ -107,9 +123,44 @@ index 1a054b8..d3489d9 100644
  	queue->isSet = CreateEventA(nullptr, TRUE, FALSE, nullptr);
  
  	if (!queue->isSet)
-@@ -380,6 +384,7 @@ void android_event_queue_uninit(freerdp* inst)
+ 	{
++		DeleteCriticalSection(&queue->lock);
+ 		free(queue);
+ 		return FALSE;
+ 	}
+@@ -345,6 +358,7 @@ BOOL android_event_queue_init(freerdp* inst)
+ 	{
+ 		WLog_ERR(TAG, "android_event_queue_init: memory allocation failed");
+ 		(void)CloseHandle(queue->isSet);
++		DeleteCriticalSection(&queue->lock);
+ 		free(queue);
+ 		return FALSE;
+ 	}
+@@ -366,20 +380,29 @@ void android_event_queue_uninit(freerdp* inst)
+ 
+ 	if (queue)
+ 	{
++		/* Detach first so a late push sees no queue instead of freed memory. */
++		aCtx->event_queue = nullptr;
++
+ 		if (queue->isSet)
+ 		{
+ 			(void)CloseHandle(queue->isSet);
+ 			queue->isSet = nullptr;
+ 		}
+ 
++		EnterCriticalSection(&queue->lock);
+ 		if (queue->events)
+ 		{
++			/* Free events never processed, such as clipboard text. */
++			for (int i = 0; i < queue->count; i++)
++				android_event_free(queue->events[i]);
+ 			free(queue->events);
+ 			queue->events = nullptr;
+ 			queue->size = 0;
  			queue->count = 0;
  		}
++		LeaveCriticalSection(&queue->lock);
  
 +		DeleteCriticalSection(&queue->lock);
  		free(queue);

@@ -43,6 +43,10 @@ type inhibitor struct {
 // keep-awake is reported as on; polkit or logind refusals exit sooner.
 const inhibitStartCheck = 300 * time.Millisecond
 
+// inhibitStopWait is how long systemd-inhibit gets to exit on SIGTERM before
+// it is killed.
+const inhibitStopWait = 2 * time.Second
+
 func runQuiet(ctx context.Context, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -83,7 +87,13 @@ func (g *gnomeDesktop) SetKeepAwake(on bool) error {
 		inh := g.inhibit
 		g.inhibit = nil
 		_ = inh.cmd.Process.Signal(syscall.SIGTERM)
-		<-inh.done
+		select {
+		case <-inh.done:
+		case <-time.After(inhibitStopWait):
+			// Never block status and shutdown on a stuck child.
+			_ = inh.cmd.Process.Kill()
+			<-inh.done
+		}
 		return nil
 	}
 	cmd := exec.Command("systemd-inhibit",

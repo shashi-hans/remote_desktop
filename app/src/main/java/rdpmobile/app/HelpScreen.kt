@@ -101,7 +101,7 @@ fun HelpScreen(onBack: () -> Unit) {
 
         Section(
             "Notifications",
-            "Turn on \"Laptop notifications on this phone\" on the home screen. While the session screen is open, " +
+            "Turn on \"Laptop notifications\" on the home screen. While the session screen is open, " +
                 "laptop pop-ups only play the tone, since you can already see them. Claude Code alerts always show in full.",
         )
 

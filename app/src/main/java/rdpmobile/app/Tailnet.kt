@@ -4,7 +4,9 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.SystemClock
 import android.util.Log
+import android.widget.Toast
 import androidx.browser.customtabs.CustomTabsIntent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,7 +41,9 @@ sealed interface TailnetStatus {
 object Tailnet {
     private const val TAG = "Tailnet"
     private const val HOSTNAME = "rdp-mobile"
-    private const val RETRY_MS = 10_000L
+    private const val MIN_RETRY_MS = 10_000L
+    private const val MAX_RETRY_MS = 300_000L
+    private const val RUNNING_POLL_MS = 10_000L
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _status = MutableStateFlow<TailnetStatus>(TailnetStatus.Starting)
@@ -59,18 +63,42 @@ object Tailnet {
         appContext = context.applicationContext
         val dir = File(appContext.filesDir, "tailscale").path
         scope.launch {
+            var retryMs = MIN_RETRY_MS
+            var nextStartAt = 0L
             while (true) {
-                // Starts the node; a no-op while it runs. After an error the
-                // bridge has torn the node down, so this starts a fresh one.
-                try {
-                    Tsbridge.start(dir, HOSTNAME, AndroidInterfaces)
-                } catch (e: Exception) {
-                    Log.w(TAG, "start failed", e)
-                    _status.value = TailnetStatus.Error(e.message ?: "Tailscale failed to start")
-                    delay(RETRY_MS)
-                    continue
+                val state = Tsbridge.state()
+                val now = SystemClock.elapsedRealtime()
+                when (state) {
+                    // A healthy node: the next error starts a fresh backoff.
+                    "Running", "NeedsLogin" -> {
+                        retryMs = MIN_RETRY_MS
+                        nextStartAt = 0L
+                    }
+                    // First sight of an error: show it, retry after retryMs.
+                    "Error" -> if (nextStartAt == 0L) nextStartAt = now + retryMs
                 }
-                _status.value = when (val s = Tsbridge.state()) {
+                // Start only when no node exists ("Stopped") or when an errored
+                // node is due for a retry. Starting blindly would replace an
+                // errored node at once and hide its error behind "Starting".
+                if (state == "Stopped" || (state == "Error" && now >= nextStartAt)) {
+                    try {
+                        Tsbridge.start(dir, HOSTNAME, AndroidInterfaces)
+                    } catch (e: Exception) {
+                        // Includes "still stopping" while the old node closes;
+                        // that is not a new failure, so the backoff stays put.
+                        Log.w(TAG, "start failed: ${e.message}")
+                        if (state == "Stopped") _status.value = TailnetStatus.Error(e.message ?: "Tailscale failed to start")
+                        delay(2000)
+                        continue
+                    }
+                    if (state == "Error") {
+                        // Schedule the next retry now: a node that fails again
+                        // within one poll must still wait, twice as long.
+                        retryMs = (retryMs * 2).coerceAtMost(MAX_RETRY_MS)
+                        nextStartAt = now + retryMs
+                    }
+                }
+                _status.value = when (Tsbridge.state()) {
                     "Running" -> {
                         if (loginTabOpen) returnFromLoginTab()
                         TailnetStatus.Running
@@ -82,8 +110,8 @@ object Tailnet {
                 }
                 delay(
                     when (_status.value) {
-                        TailnetStatus.Running -> 3000
-                        is TailnetStatus.Error -> RETRY_MS
+                        TailnetStatus.Running -> RUNNING_POLL_MS
+                        is TailnetStatus.Error -> 2000
                         else -> 700
                     },
                 )
@@ -137,12 +165,16 @@ object Tailnet {
      * to the browser when no Custom Tabs provider is installed.
      */
     fun openLogin(context: Context, url: String) {
-        loginTabOpen = true
         val uri = Uri.parse(url)
         try {
             CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(context, uri)
+            loginTabOpen = true
         } catch (e: ActivityNotFoundException) {
-            context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            try {
+                context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (e: ActivityNotFoundException) {
+                Toast.makeText(context, "No web browser found to sign in", Toast.LENGTH_LONG).show()
+            }
         }
     }
 

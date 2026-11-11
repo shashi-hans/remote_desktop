@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Notification icon: the launcher's monitor and pointer, white on transparent. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M3.5,3 h17 a1.5,1.5 0 0 1 1.5,1.5 v11 a1.5,1.5 0 0 1 -1.5,1.5 h-17 a1.5,1.5 0 0 1 -1.5,-1.5 v-11 a1.5,1.5 0 0 1 1.5,-1.5 z M4,5 v10 h16 v-10 z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M10.5,17 h3 v2.5 h-3 z M7,19.5 h10 v1.5 h-10 z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M10,6.5 L10,13.5 L11.7,11.9 L12.9,14.5 L14.1,14 L12.9,11.4 L15.2,11.4 Z" />
+</vector>

@@ -37,7 +37,7 @@ class NotifyService : Service() {
             startForeground(
                 ONGOING_ID,
                 Notification.Builder(this, CHANNEL_WATCH)
-                    .setSmallIcon(android.R.drawable.ic_menu_view)
+                    .setSmallIcon(R.drawable.ic_stat_desktop)
                     .setContentTitle("Watching laptop notifications")
                     .setContentIntent(openApp(this))
                     .setOngoing(true)
@@ -65,20 +65,33 @@ class NotifyService : Service() {
     private suspend fun pollLoop() {
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         var backoffMs = MIN_BACKOFF_MS
+        val store = ConfigStore(this)
         while (scope.isActive) {
-            val config = ConfigStore(this).load()
-            if (!config.hasAgent || !Tailnet.awaitRunning(30_000)) {
+            val version = store.version()
+            // null: settings unreadable for now; wait rather than treat an
+            // empty config as a different laptop.
+            val config = store.loadOrNull()
+            if (config == null || !config.hasAgent || !Tailnet.awaitRunning(30_000)) {
                 delay(backoffMs)
                 backoffMs = (backoffMs * 2).coerceAtMost(MAX_BACKOFF_MS)
                 continue
+            }
+            // The saved epoch and cursor belong to one laptop. For a different
+            // one, forget them, so it starts from "now" instead of replaying
+            // up to 100 old notes, each with a sound.
+            val target = "${config.host.trim()}:${config.agentPort}"
+            if (prefs.getString(KEY_TARGET, null) != target) {
+                prefs.edit().remove(KEY_EPOCH).remove(KEY_CURSOR).putString(KEY_TARGET, target).apply()
             }
             try {
                 val client = AgentClient(config)
                 val epoch = prefs.getString(KEY_EPOCH, null)
                 var cursor = prefs.getLong(KEY_CURSOR, -1)
-                // A new agent process restarts ids at 1; start again from "now".
+                // A new agent process (new epoch) restarts ids at 1. If we were
+                // following an older one, replay everything it has had since
+                // it started; on first use, start from "now".
                 val first = client.notifications(-1, 0)
-                if (first.epoch != epoch) cursor = first.latest
+                if (first.epoch != epoch) cursor = if (epoch == null) first.latest else 0L
                 saveCursor(first.epoch, cursor)
                 backoffMs = MIN_BACKOFF_MS
 
@@ -88,8 +101,9 @@ class NotifyService : Service() {
                     r.items.forEach(::post)
                     cursor = maxOf(r.latest, r.items.maxOfOrNull { it.id } ?: cursor)
                     saveCursor(r.epoch, cursor)
-                    // Settings may have changed (new laptop or token): start over.
-                    if (ConfigStore(this).load().agentKey != config.agentKey) break
+                    // Settings were saved again (maybe a new laptop or token):
+                    // start over. Comparing a counter avoids a decrypt per poll.
+                    if (store.version() != version) break
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "poll: ${e.message}")
@@ -119,7 +133,7 @@ class NotifyService : Service() {
             nm.notify(
                 CHIME_ID,
                 Notification.Builder(this, CHANNEL_CHIME)
-                    .setSmallIcon(android.R.drawable.ic_menu_view)
+                    .setSmallIcon(R.drawable.ic_stat_desktop)
                     .setContentTitle(n.app.ifBlank { "Laptop" })
                     .setTimeoutAfter(CHIME_TIMEOUT_MS)
                     .setVisibility(Notification.VISIBILITY_PRIVATE)
@@ -130,11 +144,11 @@ class NotifyService : Service() {
 
         val title = if (n.title.isBlank()) n.app else n.title
         val public = Notification.Builder(this, CHANNEL_LAPTOP)
-            .setSmallIcon(android.R.drawable.ic_menu_view)
+            .setSmallIcon(R.drawable.ic_stat_desktop)
             .setContentTitle("Laptop notification")
             .build()
         val note = Notification.Builder(this, CHANNEL_LAPTOP)
-            .setSmallIcon(android.R.drawable.ic_menu_view)
+            .setSmallIcon(R.drawable.ic_stat_desktop)
             .setContentTitle(title)
             .setContentText(n.body)
             .setStyle(Notification.BigTextStyle().bigText(n.body))
@@ -178,6 +192,7 @@ class NotifyService : Service() {
         private const val PREFS = "notify"
         private const val KEY_EPOCH = "epoch"
         private const val KEY_CURSOR = "cursor"
+        private const val KEY_TARGET = "target"
         private const val KEY_ENABLED = "enabled"
 
         fun isEnabled(context: Context): Boolean =
@@ -229,9 +244,12 @@ class NotifyService : Service() {
     }
 }
 
-/** Restarts notification forwarding after a reboot if it was on. */
+/** Restarts notification forwarding after a reboot or an app update if it was on. */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED) NotifyService.startIfEnabled(context)
+        when (intent.action) {
+            Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED ->
+                NotifyService.startIfEnabled(context)
+        }
     }
 }

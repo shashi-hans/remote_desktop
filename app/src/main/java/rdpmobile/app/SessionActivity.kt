@@ -16,7 +16,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
@@ -43,6 +46,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -72,9 +77,21 @@ class SessionActivity : ComponentActivity() {
         }
 
         store = ConfigStore(this)
-        config = store.load()
+        config = store.loadOrNull() ?: run {
+            // The keystore cannot decrypt the settings right now.
+            Toast.makeText(this, "Settings could not be read. Try again.", Toast.LENGTH_LONG).show()
+            finish()
+            return
+        }
         Tailnet.start(this)
-        session = Sessions.current ?: RdpSession(applicationContext, config, store).also {
+        val existing = Sessions.current
+        if (existing == null && savedInstanceState != null) {
+            // Android killed the app while this screen was open and is now
+            // restoring it. Do not reconnect behind the user's back; go home.
+            finish()
+            return
+        }
+        session = existing ?: RdpSession(applicationContext, config, store).also {
             Sessions.current = it
             val (w, h) = desktopSize()
             it.connect(w, h)
@@ -109,7 +126,8 @@ class SessionActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        if (isFinishing) {
+        // session is unset when onCreate finished early after process death.
+        if (isFinishing && ::session.isInitialized) {
             session.disconnect()
             Sessions.current = null
         }
@@ -130,7 +148,13 @@ class SessionActivity : ComponentActivity() {
                     CircularProgressIndicator()
                     Text("Connecting to ${config.name}…", color = Color.White, modifier = Modifier.padding(top = 16.dp))
                 }
-                SessionState.Connected -> Column(Modifier.fillMaxSize().imePadding()) {
+                SessionState.Connected -> Column(
+                    Modifier.fillMaxSize()
+                        // Keep the desktop and key bar clear of a camera cutout
+                        // (edge-to-edge is forced from Android 15).
+                        .windowInsetsPadding(WindowInsets.displayCutout)
+                        .imePadding(),
+                ) {
                     var view by remember { mutableStateOf<RemoteView?>(null) }
                     AndroidView(
                         factory = { ctx -> RemoteView(ctx, session).also { view = it } },
@@ -234,7 +258,7 @@ class SessionActivity : ComponentActivity() {
             KeyButton("↓") { tap(VK.DOWN) }
             KeyButton("→") { tap(VK.RIGHT) }
             KeyButton("Del") { tap(VK.DELETE) }
-            IconButton(onClick = { pasteToLaptop() }) {
+            IconButton(onClick = { pasteToLaptop(ctrlHeld = VK.LCONTROL in held) }) {
                 Icon(Icons.Default.ContentPaste, "Paste phone clipboard", tint = Color.White)
             }
             IconButton(onClick = onClose) { Icon(Icons.Default.Close, "Disconnect", tint = Color.White) }
@@ -242,7 +266,7 @@ class SessionActivity : ComponentActivity() {
     }
 
     /** Puts the phone clipboard on the laptop clipboard, then sends Ctrl+V. */
-    private fun pasteToLaptop() {
+    private fun pasteToLaptop(ctrlHeld: Boolean) {
         val clip = getSystemService(ClipboardManager::class.java)?.primaryClip
         val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()
         if (text.isNullOrEmpty()) {
@@ -251,9 +275,14 @@ class SessionActivity : ComponentActivity() {
         }
         session.sendClipboard(text)
         window.decorView.postDelayed({
-            session.key(VK.LCONTROL, true)
-            session.tapKey('V'.code)
-            session.key(VK.LCONTROL, false)
+            if (ctrlHeld) {
+                // Ctrl is already down from the key bar; leave it that way.
+                session.tapKey('V'.code)
+            } else {
+                session.key(VK.LCONTROL, true)
+                session.tapKey('V'.code)
+                session.key(VK.LCONTROL, false)
+            }
         }, 150)
     }
 
@@ -276,12 +305,16 @@ private fun KeyButton(label: String, onClick: () -> Unit) {
 
 @Composable
 private fun ModButton(label: String, active: Boolean, onClick: () -> Unit) {
+    // Held state is shown by colour, so it is also announced to screen readers.
+    val a11y = Modifier.semantics { stateDescription = if (active) "held" else "not held" }
     if (active) {
-        Button(onClick = onClick, contentPadding = KeyPadding) {
+        Button(onClick = onClick, contentPadding = KeyPadding, modifier = a11y) {
             Text(label)
         }
     } else {
-        KeyButton(label, onClick)
+        FilledTonalButton(onClick = onClick, contentPadding = KeyPadding, modifier = a11y) {
+            Text(label)
+        }
     }
 }
 

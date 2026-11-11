@@ -29,6 +29,10 @@ var (
 	loginURL string
 	state    = "Stopped"
 	lastErr  string
+
+	// closing is true while fail() shuts a node down. Start and Forward
+	// refuse to run until it ends, so nothing uses or replaces a half-closed node.
+	closing bool
 )
 
 // Start launches the node with its state kept in stateDir. It returns at once;
@@ -38,6 +42,9 @@ var (
 func Start(stateDir, hostname string, ifaces InterfaceSource) error {
 	mu.Lock()
 	defer mu.Unlock()
+	if closing {
+		return errors.New("tailscale is still stopping")
+	}
 	if srv != nil {
 		return nil
 	}
@@ -65,7 +72,9 @@ func Start(stateDir, hostname string, ifaces InterfaceSource) error {
 		Hostname:  hostname,
 		Ephemeral: false,
 		Logf:      func(string, ...any) {},
-		UserLogf:  log.Printf,
+		// Discarded too: it prints the one-time login URL, which would land
+		// in logcat. State and LoginURL expose everything the app needs.
+		UserLogf: func(string, ...any) {},
 	}
 	srv = s
 	state = "Starting"
@@ -106,17 +115,11 @@ func run(s *tsnet.Server) {
 			case ipn.NeedsLogin:
 				if !loginRequested {
 					loginRequested = true
-					// Ask the control server for a login URL; it arrives as BrowseToURL.
-					go func() {
-						if err := lc.StartLoginInteractive(ctx); err != nil {
-							mu.Lock()
-							lastErr = "sign-in link: " + err.Error()
-							mu.Unlock()
-						}
-					}()
+					go requestLoginURL(s, lc)
 				}
 			case ipn.Running:
 				loginURL = ""
+				lastErr = "" // errors from before sign-in no longer apply
 				loginRequested = false
 			}
 		}
@@ -130,19 +133,62 @@ func run(s *tsnet.Server) {
 	}
 }
 
+// loginRetry is the pause between attempts to get a sign-in link.
+const loginRetry = 10 * time.Second
+
+// requestLoginURL asks the control server for a login URL, which arrives on
+// the IPN bus as BrowseToURL. It retries while node s still needs a login, so
+// a failed request does not leave the UI waiting for a link forever.
+func requestLoginURL(s *tsnet.Server, lc interface {
+	StartLoginInteractive(context.Context) error
+}) {
+	// stillNeeded reports whether s is still the live node waiting for a
+	// link. mu must be held.
+	stillNeeded := func() bool {
+		return srv == s && state == ipn.NeedsLogin.String() && loginURL == ""
+	}
+	for {
+		err := lc.StartLoginInteractive(context.Background())
+		if err != nil {
+			mu.Lock()
+			if stillNeeded() { // never show an old node's error on a new one
+				lastErr = "sign-in link: " + err.Error()
+			}
+			mu.Unlock()
+		}
+		// Retry both after an error and when the call succeeded but no URL
+		// arrived within loginRetry.
+		time.Sleep(loginRetry)
+		mu.Lock()
+		again := stillNeeded()
+		mu.Unlock()
+		if !again {
+			return
+		}
+	}
+}
+
 // fail records err and tears the node down so a later Start can retry. It
-// does nothing if s was already replaced or closed.
+// does nothing if s was already replaced or closed. srv is cleared only after
+// Close returns, so a new node never opens the state directory while the old
+// one is still shutting down.
 func fail(s *tsnet.Server, err error) {
 	mu.Lock()
 	if srv != s {
 		mu.Unlock()
 		return
 	}
-	srv = nil
 	state = "Error"
 	lastErr = err.Error()
+	closing = true
 	mu.Unlock()
 	_ = s.Close()
+	mu.Lock()
+	if srv == s {
+		srv = nil
+	}
+	closing = false
+	mu.Unlock()
 }
 
 // State is the backend state: Starting, NeedsLogin, NeedsMachineAuth,
@@ -174,10 +220,10 @@ func LastError() string {
 // it. Open a new one for each connection attempt.
 func Forward(target string, maxConns, windowSec int) (int, error) {
 	mu.Lock()
-	s := srv
+	s, ok := srv, srv != nil && !closing && state != "Error"
 	mu.Unlock()
-	if s == nil {
-		return 0, errors.New("tailscale not started")
+	if !ok {
+		return 0, errors.New("tailscale is not running")
 	}
 	if maxConns < 1 || windowSec < 1 {
 		return 0, fmt.Errorf("maxConns and windowSec must be positive")

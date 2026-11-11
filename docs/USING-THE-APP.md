@@ -1,4 +1,4 @@
-# Using RDP Mobile after you connect
+# Using Remote Desktop after you connect
 
 This guide covers what you see and what you can do once the laptop screen is
 open on your phone. For setup, see the [main README](../README.md).
@@ -49,7 +49,9 @@ Tips:
 
 1. Tap the **keyboard** button (first button on the key bar). The phone
    keyboard opens.
-2. Type normally. Each letter goes to the laptop as you type it.
+2. Type normally. With a normal keyboard each letter goes to the laptop as
+   you type it. Swipe and voice typing send a whole word once the keyboard
+   confirms it.
 3. Tap the keyboard button again to close it.
 
 Suggestions and autocorrect are turned off on purpose, so the laptop gets
@@ -80,7 +82,10 @@ held. To press a shortcut:
 3. The hold key lets go by itself after that key.
 
 If you type the second key on the phone keyboard instead (for example the
-letter `c` for Ctrl+C), the hold key stays pressed. Tap it again to let go.
+letter `c` for Ctrl+C), the hold key stays pressed; tap it again to let go.
+Phone-keyboard letters are sent as typed characters, so whether the laptop
+treats Ctrl plus a typed letter as a shortcut depends on the app. For letter
+shortcuts, a Bluetooth or USB keyboard is the most reliable.
 
 Useful shortcuts on the Ubuntu laptop:
 
@@ -113,14 +118,25 @@ size**:
 
 Change it in Settings, then connect again.
 
-## Locked laptop screen
+## Home screen status and locking
 
-If the laptop shows its lock screen, type your Linux password with the phone
-keyboard and press Enter, the same as sitting at the laptop.
+Before you connect, the home screen card shows the laptop's live state: online
+or offline, **Screen locked** or **Screen unlocked**, battery, and Keep awake.
+Next to the address it shows when it was last checked; tap the refresh button
+(it spins while checking) to update it.
 
-The laptop needs the "Allow Locked Remote Desktop" extension loaded (log out
-and in once after installing it). Without it, the connection ends as soon as
-the laptop locks.
+The button below the notification switch changes with the lock state:
+
+- **🔒 Lock laptop now** when the laptop is unlocked. It asks first, then locks
+  the laptop's screen.
+- **🔓 Unlock laptop** when it is locked. It opens the remote session on the
+  laptop's lock screen; type your Linux password with the phone keyboard and
+  press Enter, the same as sitting at the laptop.
+
+Unlocking from the phone needs the "Allow Locked Remote Desktop" extension
+loaded on the laptop (log out and in once after installing it). Without it,
+Remote Desktop pauses while the laptop is locked: the card then says to unlock
+it at the laptop, and the Unlock button is hidden.
 
 ## Notifications while connected
 

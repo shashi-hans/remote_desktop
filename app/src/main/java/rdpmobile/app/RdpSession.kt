@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
 import com.freerdp.freerdpcore.services.LibFreeRDP
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -98,12 +99,15 @@ class RdpSession(
             }
             // FreeRDP may retry the TCP connection during negotiation, so the
             // relay allows a few connections for a short time.
-            val port = runCatching { Tailnet.localPort(config.host.trim(), config.rdpPort, maxConns = 3, windowSec = 30) }
-                .getOrElse {
-                    _state.value = SessionState.Failed(it.message ?: "Could not open the Tailscale relay")
-                    return@launch
-                }
-            if (!userClosed) start(width, height, port)
+            val port = try {
+                Tailnet.localPort(config.host.trim(), config.rdpPort, maxConns = 3, windowSec = 30)
+            } catch (e: CancellationException) {
+                throw e // disconnect() cancelled us; not a failure
+            } catch (e: Exception) {
+                _state.value = SessionState.Failed(e.message ?: "Could not open the Tailscale relay")
+                return@launch
+            }
+            start(width, height, port)
         }
     }
 
@@ -113,12 +117,36 @@ class RdpSession(
             _state.value = SessionState.Failed("Could not create RDP instance")
             return
         }
-        if (!LibFreeRDP.parseArguments(i, buildArgs(width, height, localPort)) || !LibFreeRDP.connect(i)) {
+        if (!LibFreeRDP.parseArguments(i, buildArgs(width, height, localPort))) {
             _state.value = SessionState.Failed(LibFreeRDP.lastError(i) ?: "Could not start RDP")
             LibFreeRDP.freeInstance(i)
             return
         }
-        instLock.write { inst = i }
+        // Publish inst and start FreeRDP's thread under the same lock that
+        // disconnect() takes to set userClosed: either disconnect() runs first
+        // and this never connects, or it runs after and sees a live inst to
+        // stop. Nothing can be left running without a screen. Holding the
+        // lock here is safe: connect only spawns the thread, and a callback
+        // that needs the lock (release) just waits until it is dropped.
+        val started = instLock.write {
+            if (userClosed) {
+                null
+            } else {
+                inst = i // set before the thread exists, so its callbacks see it
+                LibFreeRDP.connect(i).also { ok -> if (!ok) inst = 0L }
+            }
+        }
+        when (started) {
+            null -> {
+                LibFreeRDP.freeInstance(i)
+                _state.value = SessionState.Closed
+            }
+            false -> {
+                _state.value = SessionState.Failed(LibFreeRDP.lastError(i) ?: "Could not start RDP")
+                LibFreeRDP.freeInstance(i)
+            }
+            true -> {}
+        }
     }
 
     private fun buildArgs(width: Int, height: Int, localPort: Int): Array<String> = arrayOf(
@@ -142,7 +170,7 @@ class RdpSession(
     )
 
     fun disconnect() {
-        userClosed = true
+        instLock.write { userClosed = true }
         connectJob?.cancel()
         withInst { LibFreeRDP.disconnect(it) }
         // A pending certificate prompt would otherwise block the native thread.
@@ -237,8 +265,16 @@ class RdpSession(
 
     override fun onGraphicsResize(width: Int, height: Int, bpp: Int) = newBitmap(width, height)
 
+    /**
+     * Runs on FreeRDP's native thread. An exception here would stay pending in
+     * JNI while FreeRDP keeps calling into Java, so failures are logged and
+     * the old bitmap is kept.
+     */
     private fun newBitmap(width: Int, height: Int) {
-        bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        if (width <= 0 || height <= 0) return
+        runCatching { Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888) }
+            .onSuccess { bitmap = it }
+            .onFailure { Log.w(TAG, "desktop bitmap ${width}x$height: ${it.message}") }
         onFrame?.invoke()
     }
 
@@ -274,6 +310,9 @@ class RdpSession(
         fingerprint: String,
         flags: Long,
     ): Int {
+        // The user already left: answer at once instead of waiting for a
+        // prompt nobody will see.
+        if (userClosed) return LibFreeRDP.CERT_REJECT
         val fp = runCatching { normalizeFingerprint(fingerprint) }.getOrElse {
             Log.w(TAG, "unreadable certificate fingerprint")
             return LibFreeRDP.CERT_REJECT
@@ -301,8 +340,11 @@ class RdpSession(
     override fun onRemoteClipboardChanged(data: String) {}
 
     override fun onPointerSet(pixels: IntArray, width: Int, height: Int, hotX: Int, hotY: Int) {
-        val b = Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
-        _pointer.value = RemotePointer(b, hotX, hotY)
+        // Native thread: never let a bad cursor image throw into JNI.
+        if (width <= 0 || height <= 0 || pixels.size < width * height) return
+        runCatching { Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888) }
+            .onSuccess { _pointer.value = RemotePointer(it, hotX, hotY) }
+            .onFailure { Log.w(TAG, "cursor bitmap: ${it.message}") }
         onFrame?.invoke()
     }
 

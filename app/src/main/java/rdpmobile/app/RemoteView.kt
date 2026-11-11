@@ -8,6 +8,7 @@ import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.Rect
 import android.text.InputType
 import android.view.GestureDetector
 import android.view.HapticFeedbackConstants
@@ -20,6 +21,7 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import com.freerdp.freerdpcore.services.LibFreeRDP
 import kotlin.math.abs
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 /**
@@ -54,7 +56,12 @@ class RemoteView(context: Context, private val session: RdpSession) : View(conte
     private var dragLastX = 0f
     private var dragLastY = 0f
     private var centeredFor: Bitmap? = null
+    /** Android keyCode → VK sent on key-down, so key-up always matches. */
+    private val sentAsVk = HashMap<Int, Int>()
     private var scrollAccum = 0f
+    private var twoFingerStartSpan = 0f
+    private var twoFingerStartY = 0f
+    private var twoFingerMode = TwoFinger.UNDECIDED
     private var twoFingerStart = 0L
     private var twoFingerMoved = false
     private var lastTwoFingerY = 0f
@@ -127,17 +134,29 @@ class RemoteView(context: Context, private val session: RdpSession) : View(conte
                 twoFingerStart = e.eventTime
                 twoFingerMoved = false
                 lastTwoFingerY = (e.getY(0) + e.getY(1)) / 2
+                twoFingerStartSpan = span(e)
+                twoFingerStartY = lastTwoFingerY
+                twoFingerMode = TwoFinger.UNDECIDED
                 scrollAccum = 0f
             }
-            MotionEvent.ACTION_MOVE -> if (e.pointerCount == 2 && !scale.isInProgress) {
-                val y = (e.getY(0) + e.getY(1)) / 2
-                scrollAccum += y - lastTwoFingerY
-                lastTwoFingerY = y
-                if (abs(scrollAccum) > SCROLL_STEP_PX) {
-                    twoFingerMoved = true
-                    val up = scrollAccum > 0
-                    send(wheel(if (up) LibFreeRDP.WHEEL_DELTA else -LibFreeRDP.WHEEL_DELTA))
-                    scrollAccum = 0f
+            MotionEvent.ACTION_MOVE -> when {
+                // GestureDetector stops calling onScroll after a long press, so
+                // drag moves are tracked here.
+                dragging && e.pointerCount == 1 -> {
+                    movePointer(e.x - dragLastX, e.y - dragLastY)
+                    dragLastX = e.x
+                    dragLastY = e.y
+                }
+                e.pointerCount == 2 && !scale.isInProgress && twoFingerMode(e) == TwoFinger.SCROLL -> {
+                    val y = (e.getY(0) + e.getY(1)) / 2
+                    scrollAccum += y - lastTwoFingerY
+                    lastTwoFingerY = y
+                    if (abs(scrollAccum) > SCROLL_STEP_PX) {
+                        twoFingerMoved = true
+                        val up = scrollAccum > 0
+                        send(wheel(if (up) LibFreeRDP.WHEEL_DELTA else -LibFreeRDP.WHEEL_DELTA))
+                        scrollAccum = 0f
+                    }
                 }
             }
             MotionEvent.ACTION_POINTER_UP -> if (e.pointerCount == 2 && !twoFingerMoved &&
@@ -145,13 +164,6 @@ class RemoteView(context: Context, private val session: RdpSession) : View(conte
             ) {
                 click(LibFreeRDP.PTR_FLAGS_BUTTON2)
                 twoFingerMoved = true
-            }
-            // GestureDetector stops calling onScroll after a long press, so
-            // drag moves are tracked here.
-            MotionEvent.ACTION_MOVE -> if (dragging && e.pointerCount == 1) {
-                movePointer(e.x - dragLastX, e.y - dragLastY)
-                dragLastX = e.x
-                dragLastY = e.y
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> if (dragging) {
                 dragging = false
@@ -162,6 +174,30 @@ class RemoteView(context: Context, private val session: RdpSession) : View(conte
         // and onScroll ignores multi-finger moves, so it sees every event.
         gestures.onTouchEvent(e)
         return true
+    }
+
+    private fun span(e: MotionEvent): Float =
+        hypot(e.getX(0) - e.getX(1), e.getY(0) - e.getY(1))
+
+    /**
+     * Decides once per gesture whether two fingers are scrolling or pinching:
+     * whichever passes the slop first (gap change vs. moving together) wins
+     * and holds until the fingers lift, so finger drift during a long scroll
+     * does not cut it off, and the start of a pinch never scrolls.
+     */
+    private fun twoFingerMode(e: MotionEvent): TwoFinger {
+        if (twoFingerMode == TwoFinger.UNDECIDED) {
+            val slop = TWO_FINGER_SLOP_DP * resources.displayMetrics.density
+            val spanChange = abs(span(e) - twoFingerStartSpan)
+            val travel = abs((e.getY(0) + e.getY(1)) / 2 - twoFingerStartY)
+            twoFingerMode = when {
+                spanChange > slop && spanChange > travel -> TwoFinger.PINCH
+                travel > slop -> TwoFinger.SCROLL
+                else -> TwoFinger.UNDECIDED
+            }
+            if (twoFingerMode == TwoFinger.PINCH) twoFingerMoved = true // never a right-click tap
+        }
+        return twoFingerMode
     }
 
     private fun wheel(amount: Int): Int {
@@ -196,12 +232,14 @@ class RemoteView(context: Context, private val session: RdpSession) : View(conte
     override fun onDraw(canvas: Canvas) {
         canvas.drawColor(Color.BLACK)
         val bmp = session.bitmap ?: return
-        fitScale = minOf(width / bmp.width.toFloat(), height / bmp.height.toFloat())
+        updateFitScale(bmp)
         if (centeredFor !== bmp) {
-            // New or resized desktop: start the pointer in the middle.
+            // New or resized desktop: start the pointer in the middle, and move
+            // the laptop's pointer there too so clicks land where it is drawn.
             centeredFor = bmp
             cx = bmp.width / 2f
             cy = bmp.height / 2f
+            send(LibFreeRDP.PTR_FLAGS_MOVE)
         }
         val s = fitScale * zoom
         // Center the desktop when it is smaller than the view.
@@ -282,11 +320,21 @@ class RemoteView(context: Context, private val session: RdpSession) : View(conte
 
     private fun handleKey(event: KeyEvent): Boolean {
         val down = event.action == KeyEvent.ACTION_DOWN
+        if (!down) {
+            // A key sent as a VK on key-down must get its VK key-up, even if
+            // the modifier that made it a shortcut was released first;
+            // otherwise the laptop keeps the key pressed and repeats it.
+            sentAsVk.remove(event.keyCode)?.let {
+                session.key(it, false)
+                return true
+            }
+        }
         // With Ctrl, Alt or Meta held, Android gives letters no unicode
         // character, so Ctrl+C would be lost; send letters and digits as keys.
         val shortcut = event.isCtrlPressed || event.isAltPressed || event.isMetaPressed
         val vk = androidToVk(event.keyCode) ?: if (shortcut) letterOrDigitVk(event.keyCode) else null
         if (vk != null) {
+            if (down) sentAsVk[event.keyCode] = vk
             session.key(vk, down)
             return true
         }
@@ -326,7 +374,14 @@ class RemoteView(context: Context, private val session: RdpSession) : View(conte
         else -> null
     }
 
+    private fun updateFitScale(bmp: Bitmap) {
+        if (width > 0 && height > 0) {
+            fitScale = minOf(width / bmp.width.toFloat(), height / bmp.height.toFloat())
+        }
+    }
+
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        session.bitmap?.let(::updateFitScale)
         followCursor()
     }
 
@@ -336,7 +391,20 @@ class RemoteView(context: Context, private val session: RdpSession) : View(conte
         requestFocus()
     }
 
+    /** Sends key-up for every key the laptop still has down from this view. */
+    private fun releaseHeldKeys() {
+        sentAsVk.values.forEach { session.key(it, false) }
+        sentAsVk.clear()
+    }
+
+    override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: Rect?) {
+        super.onFocusChanged(gainFocus, direction, previouslyFocusedRect)
+        // Key-ups go to whatever has focus next, so release now.
+        if (!gainFocus) releaseHeldKeys()
+    }
+
     override fun onDetachedFromWindow() {
+        releaseHeldKeys()
         // A newer view may own the callback by now; only clear our own.
         if (session.onFrame === frameCallback) session.onFrame = null
         super.onDetachedFromWindow()
@@ -344,6 +412,9 @@ class RemoteView(context: Context, private val session: RdpSession) : View(conte
 
     private companion object {
         const val SCROLL_STEP_PX = 40f
+        const val TWO_FINGER_SLOP_DP = 12f
         const val TWO_FINGER_TAP_MS = 250L
     }
 }
+
+private enum class TwoFinger { UNDECIDED, SCROLL, PINCH }

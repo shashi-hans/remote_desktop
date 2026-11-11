@@ -107,7 +107,7 @@ The app asks for confirmation before it locks the laptop for this reason.
 
 ## Laptop notifications on the phone
 
-The home screen switch "Laptop notifications on this phone" starts
+The home screen switch "Laptop notifications" (ⓘ shows what it does) starts
 `NotifyService`, a foreground service that long-polls the agent's
 `GET /v1/notifications?after=<id>&wait=25` over the embedded Tailscale node
 and posts each laptop notification with the default sound.
@@ -153,6 +153,7 @@ up after 2 seconds and always exits 0, so it cannot block a Claude turn.
 | --- | --- |
 | One-finger drag | Move cursor (trackpad style) |
 | Tap | Left click |
+| Tap twice quickly | Double click |
 | Two-finger tap | Right click |
 | Two-finger drag | Scroll |
 | Pinch | Zoom 1x to 4x; the view follows the cursor |
