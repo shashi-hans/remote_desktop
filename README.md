@@ -1,4 +1,4 @@
-# rdp-mobile
+# remote_desktop
 
 Android app that shows and controls one Linux laptop's desktop over RDP, plus a
 small laptop agent for status, lock and keep-awake. Built for personal use on
